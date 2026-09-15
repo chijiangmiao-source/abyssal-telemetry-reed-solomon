@@ -6,6 +6,8 @@ from .rs.decoder import N
 
 CODEWORD_HEX_LENGTH = 2 * N  # 255 bytes -> 510 hex characters
 
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
 
 class DecodeRequest(BaseModel):
     codeword: str = Field(
@@ -23,10 +25,11 @@ class DecodeRequest(BaseModel):
             raise ValueError(
                 f"codeword must be {N} bytes ({CODEWORD_HEX_LENGTH} hex characters)"
             )
-        try:
-            bytes.fromhex(v)
-        except ValueError:
-            raise ValueError("codeword must be hexadecimal") from None
+        # bytes.fromhex() silently skips ASCII whitespace, so check every
+        # character explicitly: a 510-char string with two spaces would
+        # otherwise decode to 254 bytes and fail later as a server error.
+        if not all(c in _HEX_DIGITS for c in v):
+            raise ValueError("codeword must be hexadecimal")
         return v
 
     @field_validator("erasures")

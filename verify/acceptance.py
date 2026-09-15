@@ -167,6 +167,17 @@ def main():
         check("erasure position -1 -> 400", resp.status_code == 400,
               f"got {resp.status_code}")
 
+        # 6b. Right length but containing whitespace: bytes.fromhex would
+        # silently skip it, so the frame must be rejected as malformed (400),
+        # never as an internal error.
+        damaged_ws = codeword.hex()
+        damaged_ws = damaged_ws[:100] + "  " + damaged_ws[102:]
+        resp = client.post(
+            "/decode", json={"codeword": damaged_ws, "erasures": []}
+        )
+        check("whitespace inside codeword -> 400", resp.status_code == 400,
+              f"got {resp.status_code}")
+
     return report()
 
 

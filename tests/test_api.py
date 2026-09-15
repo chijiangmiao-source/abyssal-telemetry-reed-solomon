@@ -100,6 +100,23 @@ def test_malformed_codeword_returns_400(codeword):
     assert resp.status_code == 400
 
 
+@pytest.mark.parametrize("whitespace", [" ", "\t", "\n", "\r"])
+def test_whitespace_in_codeword_returns_400_not_500(codeword, whitespace):
+    # bytes.fromhex() silently skips ASCII whitespace, so a 510-char string
+    # with whitespace would decode to fewer than 255 bytes; it must be
+    # rejected as a client error, not crash the decoder.
+    frame = codeword.hex()
+    damaged = frame[:100] + whitespace * 2 + frame[102:]
+    assert len(damaged) == 510
+    resp = client.post("/decode", json={"codeword": damaged, "erasures": []})
+    assert resp.status_code == 400
+
+
+def test_whitespace_only_codeword_returns_400():
+    resp = client.post("/decode", json={"codeword": " " * 510, "erasures": []})
+    assert resp.status_code == 400
+
+
 def test_missing_fields_return_400():
     assert client.post("/decode", json={}).status_code == 400
     assert client.post("/decode", json={"erasures": []}).status_code == 400
