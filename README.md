@@ -73,6 +73,101 @@ docker compose run --rm verify
 
 **400 — 请求非法**：码字不是 510 位十六进制、擦除位置越界（∉ [0,254]）或重复。
 
+## 海试分片汇聚
+
+一帧常被拆成多段、经重复投递乱序到达。`/assemblies/{assembly_id}` 提供进程内
+汇聚会话，把 255 字节汇齐后交给上面同一个译码器。会话标识由调用方任选；会话
+只存在于当前进程，重启后同标识等于全新会话。会话只有三种状态：
+
+| 状态 | 含义 |
+| --- | --- |
+| `collecting` | 收集中，字节尚未汇齐或尚未提交译码 |
+| `completed` | 已提交且译码完成，终态，结果不可改写 |
+| `rejected` | 片段矛盾（重叠字节不一致或擦除声明冲突），终态，原子转入 |
+
+### `PUT /assemblies/{assembly_id}/fragments`
+
+请求体：
+
+```json
+{
+  "offset": 60,
+  "data": "<片段字节，hex，偶数长度>",
+  "erasures": [2]
+}
+```
+
+* `offset`：片段首字节在整帧中的 0 基位置，`[0,254]`；
+* `data`：片段十六进制数据，`offset + len(data) ≤ 255`；
+* `erasures`：**片内** 0 基擦除位置（上例表示帧位置 62），互异且落在片长内，
+  可省略；服务端按 `offset` 翻译成帧位置并跨片段去重。
+
+片段可乱序、可重叠（重叠字节必须一致）、可无限次同内容重试，重试只回当前进度。
+收集中与汇齐（`complete: true`）但尚未 `POST .../decode` 时返回 **200**：
+
+```json
+{
+  "status": "collecting",
+  "assembly_id": "storm-7",
+  "received_bytes": 110,
+  "total_bytes": 255,
+  "complete": false,
+  "missing_ranges": [{"start": 0, "end": 59}, {"start": 111, "end": 254}],
+  "erasures": [62],
+  "decode": null
+}
+```
+
+重叠字节不一致，或在已可靠送达的位置上声明擦除（反之亦然）时，整个会话**原子**
+转为 `rejected`（当前片段一字节都不会落库），返回 **409** 及规范化（合并相邻点、
+升序、闭区间）冲突区间；此后任何片段或提交都原样重放该 409：
+
+```json
+{
+  "status": "rejected",
+  "assembly_id": "storm-7",
+  "conflict_ranges": [{"start": 5, "end": 9}]
+}
+```
+
+擦除位置上各片段送来的填充字节本身不可靠，填充值互不相同不算冲突；对同一位置
+重复声明擦除只做去重。请求体本身非法（非 hex、越界、片内擦除越界或重复等）
+返回 **400**，不改变会话。
+
+### `POST /assemblies/{assembly_id}/decode`
+
+* 尚有缺口：**409**，信封同 200 进度体，`missing_ranges` 为规范化缺失区间，
+  `decode` 为 `null`，不调用译码器，会话保持 `collecting`；
+* 已汇齐：把码字与去重后的擦除位置交给现有译码器，**首次结果永久缓存**——
+  成功 **200**、不可纠正 **422**，信封 `status` 为 `completed`，内嵌的
+  `decode` 字段与 `POST /decode` 的 200/422 响应体逐字段相同；
+* 之后的重复提交、晚到片段（含与终态矛盾的片段）一律重放同一终态：同状态码、
+  同响应体，译码器只执行一次；
+* 已拒绝会话上提交：重放 **409** 冲突区间。
+
+```json
+{
+  "status": "completed",
+  "assembly_id": "storm-7",
+  "received_bytes": 255,
+  "total_bytes": 255,
+  "complete": true,
+  "missing_ranges": [],
+  "erasures": [3, 62, 200],
+  "decode": {
+    "status": "ok",
+    "payload": "…223 字节…",
+    "corrected_codeword": "…255 字节…",
+    "corrected_positions": [3, 62, 200]
+  }
+}
+```
+
+### 并发与隔离
+
+同一会话的追加与提交在会话锁内线性化：并发提交与"最后一片竞争"只有一个请求
+能触发译码，终态唯一且可复现。不同会话使用各自的锁，互不阻塞。
+
 ### `GET /health`
 
 返回 `{"status": "healthy"}`，供 Compose 健康检查使用。
@@ -123,14 +218,21 @@ pytest
 
 覆盖：GF(256) 域公理与 α 本原性、综合值定义与可加性、编码器系统性与生成
 多项式根、译码半径边界（16 错误 / 10 擦除+11 错误可恢复，17 错误 / 33 擦除
-稳定拒绝）、随机往返，以及完整 HTTP 接口链路（200/400/422 语义）。
+稳定拒绝）、随机往返，以及完整 HTTP 接口链路（200/400/422 语义）、分片汇聚
+（乱序还原、幂等重试、规范化缺口/冲突区间、原子拒绝、终态不可改写、并发
+线性化与最后一片竞争）。
+
+一次性验收 `python -m verify.acceptance`（或 `docker compose run --rm verify`）
+在原译码链路之外，还会对在线 API 跑完整的分片汇聚场景，含 12 线程的最后一片
+竞争。
 
 ## 结构
 
 ```
 app/
-  main.py          FastAPI 入口，/decode 与 /health
+  main.py          FastAPI 入口，/decode、/health 与分片汇聚两接口
   schemas.py       Pydantic 请求/响应模型（400 校验）
+  assembly.py      汇聚会话领域对象与进程内并发存储（会话锁 + 创建门）
   rs/
     gf.py          GF(256) 指数/对数表与四则运算（0x11d, α=0x02）
     poly.py        域上多项式：乘、求值、形式导数
@@ -138,5 +240,5 @@ app/
     decoder.py     错误+擦除联合译码：BM、Chien、Forney
 verify/
   acceptance.py    一次性验收服务（compose 的 verify）
-tests/             pytest：有限域、综合计算、接口链路
+tests/             pytest：有限域、综合计算、接口链路、汇聚与并发
 ```
