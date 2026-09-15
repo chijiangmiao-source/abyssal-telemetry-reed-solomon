@@ -1,0 +1,24 @@
+services:
+  api:
+    build: .
+    image: rs255-acoustic-decoder:latest
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+
+  # One-shot acceptance suite: waits for the API to become healthy, exercises
+  # the decode endpoint against locally encoded frames, then exits (0 = pass).
+  verify:
+    image: rs255-acoustic-decoder:latest
+    build: .
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      API_BASE_URL: http://api:8000
+    command: ["python", "-m", "verify.acceptance"]
