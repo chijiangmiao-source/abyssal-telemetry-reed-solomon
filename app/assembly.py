@@ -123,21 +123,22 @@ class AssemblySession:
             clashes: set[int] = set()
             for i, byte in enumerate(data):
                 pos = offset + i
+                if pos in self._bytes and self._bytes[pos] != byte:
+                    # Overlapping byte delivered with a different value.
+                    # This still clashes when both fragments declare the
+                    # position erased: two copies of one frame cannot carry
+                    # different bytes anywhere, filler or not -- otherwise
+                    # acceptance would depend on arrival order.
+                    clashes.add(pos)
                 if pos in erasures:
-                    # Unreliable filler: no claim about its value, so it can
-                    # neither cause nor settle a byte-value conflict.
-                    continue
-                if pos in self._erasures:
+                    if pos in self._known:
+                        # Erasure claimed where an earlier fragment delivered
+                        # reliable data.
+                        clashes.add(pos)
+                elif pos in self._erasures:
                     # Reliable data where an earlier fragment claimed an
-                    # erasure: the erasure claims disagree.
+                    # erasure.
                     clashes.add(pos)
-                elif pos in self._bytes and self._bytes[pos] != byte:
-                    # Overlapping reliable byte delivered with a new value.
-                    clashes.add(pos)
-            # This fragment declares an erasure where earlier fragments
-            # reliably delivered data (re-declaring an already-erased
-            # position is merely de-duplicated, not a conflict).
-            clashes.update(pos for pos in erasures if pos in self._known)
 
             if clashes:
                 # Atomic rejection: discard the pending fragment entirely.

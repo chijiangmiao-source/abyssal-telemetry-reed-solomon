@@ -194,11 +194,27 @@ def test_reliable_redelivery_contradicts_earlier_erasure(frame):
     assert resp.json()["conflict_ranges"] == [{"start": 5, "end": 5}]
 
 
-def test_different_filler_bytes_at_erased_position_are_allowed(frame):
-    word, _, era, _ = frame
-    assert era[0] == 3 and era[0] < 40
-    put_fragment("f", 0, word[0:40], erasures=[3])
-    resp = put_fragment("f", 3, b"\xff", erasures=[0])
+def test_different_bytes_at_mutually_erased_position_are_rejected(frame):
+    word, _, _, _ = frame
+    # First fragment erases position 3 with the received byte; a second
+    # fragment overlaps it with a different filler byte, also erased: the
+    # two copies contradict each other -> atomic 409, order-independent.
+    put_fragment("f", 0, word[0:5], erasures=[3])
+    resp = put_fragment("f", 3, b"\xff" + word[4:5], erasures=[0])
+    assert resp.status_code == 409
+    assert resp.json()["conflict_ranges"] == [{"start": 3, "end": 3}]
+
+    # Reverse the arrival order: same rejection.
+    put_fragment("f2", 3, b"\xff" + word[4:5], erasures=[0])
+    resp = put_fragment("f2", 0, word[0:5], erasures=[3])
+    assert resp.status_code == 409
+    assert resp.json()["conflict_ranges"] == [{"start": 3, "end": 3}]
+
+
+def test_identical_filler_at_mutually_erased_overlap_is_accepted(frame):
+    word, _, _, _ = frame
+    put_fragment("g", 0, word[0:5], erasures=[3])
+    resp = put_fragment("g", 3, word[3:5], erasures=[0])
     assert resp.status_code == 200
     assert resp.json()["erasures"] == [3]
 

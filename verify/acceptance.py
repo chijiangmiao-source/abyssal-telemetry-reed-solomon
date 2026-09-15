@@ -336,15 +336,31 @@ def run_assembly_checks(client, codeword, payload, uncorrectable_frame):
         f"got {resp.status_code}: {resp.text[:200]}",
     )
 
-    # 12. Different filler bytes at a position all fragments call erased are
-    #     not a contradiction (the byte value is meaningless there).
-    fill_id = rid("erased-filler")
-    _put_fragment(client, fill_id, 0, frame[0:10], erasures=[3])
-    resp = _put_fragment(client, fill_id, 3, b"\xff", erasures=[0])
+    # 12. Two fragments carrying different bytes at a position both declare
+    #     erased contradict each other just like any overlapping byte -- and
+    #     the rejection is the same in either arrival order. Identical filler
+    #     at a mutually erased overlap is still accepted.
+    fill_a = rid("erased-filler-conflict-a")
+    fill_b = rid("erased-filler-conflict-b")
+    r_a = _put_fragment(client, fill_a, 0, frame[0:5], erasures=[3])
+    r_a = _put_fragment(client, fill_a, 3, b"\xff" + frame[4:5], erasures=[0])
+    _put_fragment(client, fill_b, 3, b"\xff" + frame[4:5], erasures=[0])
+    r_b = _put_fragment(client, fill_b, 0, frame[0:5], erasures=[3])
+    fill_ok = rid("erased-filler-identical")
+    _put_fragment(client, fill_ok, 0, frame[0:5], erasures=[3])
+    r_ok = _put_fragment(client, fill_ok, 3, frame[3:5], erasures=[0])
     check(
-        "different filler at erased position accepted, erasure deduped",
-        resp.status_code == 200 and resp.json().get("erasures") == [3],
-        f"got {resp.status_code}: {resp.text[:200]}",
+        "different bytes at mutually erased position -> 409, order-independent",
+        r_a.status_code == 409
+        and r_a.json().get("conflict_ranges") == [{"start": 3, "end": 3}]
+        and r_b.status_code == 409
+        and r_b.json().get("conflict_ranges") == [{"start": 3, "end": 3}],
+        f"got {r_a.status_code}/{r_b.status_code}",
+    )
+    check(
+        "identical filler at mutually erased position accepted",
+        r_ok.status_code == 200 and r_ok.json().get("erasures") == [3],
+        f"got {r_ok.status_code}: {r_ok.text[:200]}",
     )
 
     # 13. An uncorrectable assembly completes into a frozen 422, replayed by

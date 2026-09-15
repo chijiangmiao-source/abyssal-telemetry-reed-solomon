@@ -117,14 +117,25 @@ class TestMerging:
         _, fourth = s.append(30, word[30:80], [])
         assert fourth["received_bytes"] == 80
 
-    def test_garbage_filler_at_erased_position_is_not_a_conflict(self, frame):
-        word, _, era, _ = frame
-        s = AssemblySession("a")
-        s.append(0, word[0:10], [3])
-        # Position 3 is re-delivered with a different byte but still erased.
-        tag, view = s.append(3, b"\xff", [3])
-        assert tag == COLLECTING
-        assert view["erasures"] == [3]
+    def test_different_bytes_at_mutually_erased_position_is_a_conflict(self):
+        # Two copies of one frame cannot carry different bytes at an
+        # overlapping position even when both call it erased; and the
+        # rejection must not depend on which fragment arrives first.
+        def session(first_erased: bool):
+            s = AssemblySession("a")
+            if first_erased:
+                s.append(0, b"\x01\x02\x03\x04", [3])
+                tag, ranges = s.append(3, b"\xff", [3])
+            else:
+                s.append(3, b"\xff", [3])
+                tag, ranges = s.append(0, b"\x01\x02\x03\x04", [3])
+            return s, tag, ranges
+
+        for order in (True, False):
+            s, tag, ranges = session(order)
+            assert tag == REJECTED
+            assert ranges == [{"start": 3, "end": 3}]
+            assert s.status == REJECTED
 
     def test_redeclaring_erasure_is_deduplicated(self, frame):
         word, _, _, _ = frame
@@ -132,6 +143,18 @@ class TestMerging:
         s.append(0, word[0:10], [2])
         _, view = s.append(0, word[0:10], [2])
         assert view["erasures"] == [2]
+
+    def test_same_filler_at_mutually_erased_overlap_is_accepted(self, frame):
+        word, _, _, _ = frame
+        # Two fragments overlap at position 3, both declare it erased and
+        # carry the identical filler byte: no contradiction.
+        s = AssemblySession("a")
+        tag, view = s.append(0, word[0:5], [3])
+        assert tag == COLLECTING
+        tag, view = s.append(3, word[3:5], [3])
+        assert tag == COLLECTING
+        assert view["erasures"] == [3]
+        assert view["received_bytes"] == 5
 
 
 class TestConflicts:
